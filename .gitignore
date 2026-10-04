@@ -1,0 +1,11 @@
+.env
+.tools/
+.venv/
+__pycache__/
+.pytest_cache/
+node_modules/
+dist/
+results/*.json
+results/*.xml
+!results/example.json
+*.exe

@@ -1,0 +1,93 @@
+name: secureagent
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_DB: secureagent
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local-admin-demo}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:-local-app-demo}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init.sh:/docker-entrypoint-initdb.d/01-init.sh:ro
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U postgres -d secureagent"]
+      interval: 3s
+      retries: 20
+  redis:
+    image: redis:7.4-alpine
+    command: [redis-server, --appendonly, "yes"]
+    volumes: ["redisdata:/data"]
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 3s
+      retries: 20
+  gateway:
+    build: ./gateway
+    environment:
+      JWT_SECRET: ${JWT_SECRET:?Generate .env with scripts/setup_env.py}
+      WORKER_SECRET: ${WORKER_SECRET:?Generate .env with scripts/setup_env.py}
+      DEMO_PASSWORD: ${DEMO_PASSWORD:-secureagent-demo}
+      MAX_TOOL_CALLS: ${MAX_TOOL_CALLS:-25}
+      MAX_TOKENS: ${MAX_TOKENS:-20000}
+      MAX_COST_USD: ${MAX_COST_USD:-0.50}
+      RUN_TIMEOUT_SECONDS: ${RUN_TIMEOUT_SECONDS:-300}
+      RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-120}
+      MODEL_INPUT_USD_PER_MILLION: ${MODEL_INPUT_USD_PER_MILLION:-10}
+      MODEL_OUTPUT_USD_PER_MILLION: ${MODEL_OUTPUT_USD_PER_MILLION:-40}
+      DATABASE_URL: postgresql://secureagent_app:${APP_DB_PASSWORD:-local-app-demo}@postgres:5432/secureagent
+      REDIS_URL: redis://redis:6379/0
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel:4318
+    ports: ["127.0.0.1:8080:8080"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+  api:
+    build: ./runtime
+    command: [uvicorn, app.api:app, --host, 0.0.0.0, --port, "8000"]
+    environment:
+      GATEWAY_URL: http://gateway:8080
+    depends_on: [gateway]
+  worker:
+    build: ./runtime
+    command: [python, -m, app.worker]
+    environment:
+      WORKER_SECRET: ${WORKER_SECRET:?Generate .env with scripts/setup_env.py}
+      MODEL_PROVIDER: ${MODEL_PROVIDER:-mock}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      GATEWAY_URL: http://gateway:8080
+      REDIS_URL: redis://redis:6379/0
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel:4318
+    depends_on:
+      redis: {condition: service_healthy}
+      gateway: {condition: service_started}
+  dashboard:
+    build: ./dashboard
+    ports: ["127.0.0.1:3000:8080"]
+    depends_on: [api]
+  verify:
+    build: ./runtime
+    profiles: [test]
+    command: [python, -m, pytest, -q, /tests/test_integration.py]
+    environment:
+      DEMO_PASSWORD: ${DEMO_PASSWORD:-secureagent-demo}
+      APP_DATABASE_URL: postgresql://secureagent_app:${APP_DB_PASSWORD:-local-app-demo}@postgres:5432/secureagent
+      GATEWAY_URL: http://gateway:8080
+    volumes: ["./runtime/tests:/tests:ro"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      gateway: {condition: service_started}
+  otel:
+    image: otel/opentelemetry-collector-contrib:0.123.0
+    command: [--config=/etc/otelcol/config.yaml]
+    volumes: ["./observability/collector.yaml:/etc/otelcol/config.yaml:ro"]
+    depends_on: [jaeger]
+  jaeger:
+    image: jaegertracing/all-in-one:1.67.0
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports: ["127.0.0.1:16686:16686"]
+volumes:
+  pgdata:
+  redisdata:
